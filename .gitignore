@@ -1,0 +1,38 @@
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# C++ 编译产物
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+.vs/
+x64/
+Debug/
+Release/
+bin/
+obj/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 临时文件与日志
+*.log
+*.tmp
+~$*
