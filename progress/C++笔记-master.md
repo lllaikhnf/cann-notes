@@ -751,3 +751,176 @@ system("chcp 65001 >nul");   // 把控制台切成 UTF-8
 - `鏈夐棶棰`、`閽�鍜�`、`鍘熷` → UTF-8 字节被当成 GBK 解释了
 - `C4819` → "这文件里有当前代码页表示不了的字符"
 - `C3688 文本后缀无效` → 字符串被撕开、后半截被当成运算符了
+
+---
+
+## 十八、函数指针 与 lambda（`std::sort` 第三个参数到底是什么）
+
+> 上一节你写过 `std::sort(a, a + n, better);` —— 注意 `better` **后面没有括号**。
+> 有括号是"调用它"，没括号是"把函数本身交出去"。这一节就讲清楚：函数怎么能当参数传。
+
+### 1. 函数名 = 函数的地址
+
+```cpp
+bool byScore(const Player& a, const Player& b) { ... }
+
+byScore;        // 不带括号 → 函数指针（地址）
+byScore(x, y);  // 带括号   → 调用，得到 bool
+&byScore;       // 取地址，和上面那个 byScore 是同一个东西
+```
+
+函数在内存里也有地址，函数名在**表达式**里会自动变成"指向该函数的指针"。所以函数可以像 int 一样被赋值、被传参。
+
+### 2. 函数指针类型怎么写、怎么读
+
+```cpp
+bool (*cmp)(const Player&, const Player&);
+//  ↑    ↑  └──────── 参数类型 ────────┘
+//  │    └── 变量名（* 表示它是指针），整体是"指向函数的指针"
+//  └── 该函数的返回类型
+```
+
+**读法：从名字往外读** —— "cmp 是一个指针，指向一个接收两个 `const Player&`、返回 `bool` 的函数"。
+
+⚠️ **括号必须留着**，这两种写法完全不同：
+
+| 写法 | 含义 |
+| --- | --- |
+| `bool (*cmp)(const Player&, const Player&)` | 指向函数的**指针**（我们要的） |
+| `bool *cmp(const Player&, const Player&)` | 一个**函数**，返回 `bool*`（少了一对括号，意思全变了） |
+
+嫌长可以起别名：
+
+```cpp
+using Cmp = bool (*)(const Player&, const Player&);   // 之后写 Cmp cmp 就行
+typedef bool (*Cmp)(const Player&, const Player&);    // 老写法，等价
+```
+
+### 3. 用它做"可替换规则"的排序
+
+```cpp
+void sortBy(Player a[], int n, bool (*cmp)(const Player&, const Player&)) {
+    for (int i = 0; i < n - 1; i++) {
+        int best = i;
+        for (int j = i + 1; j < n; j++)
+            if (cmp(a[j], a[best])) best = j;    // 像普通函数那样调用它
+        if (best != i) { Player t = a[i]; a[i] = a[best]; a[best] = t; }
+    }
+}
+```
+
+于是同一份排序代码，换规则只是换个名字：`sortBy(a, n, byScore);` / `sortBy(a, n, byLevel);`。
+
+调用方式有两种写法，**完全等价**：
+
+```cpp
+cmp(x, y);      // 常用
+(*cmp)(x, y);   // 先解引用再调用，也对（甚至可以写 (****cmp)(x,y)）
+```
+
+`sizeof(cmp)` 恒为 8（64 位），跟它指向的函数有多大没关系 —— **指针就是地址**。
+
+### 4. lambda：规则"当场写"
+
+每次比较规则都得起个函数名、还得放在文件别处，太啰嗦。lambda 让你把函数**就地**写出来：
+
+```cpp
+std::sort(a, a + n, [](const Player& p, const Player& q) {
+    return p.score < q.score;        // 分数升序
+});
+```
+
+语法拆解：
+
+```
+[捕获列表](参数列表) { 函数体 }
+   ↑ 决定能不能用外面的变量
+```
+
+### 5. 捕获列表：lambda 怎么拿到外面的变量
+
+| 写法 | 含义 |
+| --- | --- |
+| `[]` | 什么也不捕获，只能用参数和全局量 |
+| `[limit]` | **值捕获**：拷贝一份 `limit`（之后的修改不影响它） |
+| `[&limit]` | **引用捕获**：直接用外面那个变量 |
+| `[=]` / `[&]` | 自动捕获所有用到的变量（值 / 引用）——方便，但容易埋坑 |
+| `[desc, &n]` | 混着写也行 |
+
+```cpp
+bool desc = false;
+std::sort(a, a + n, [desc](const Player& p, const Player& q) {
+    return desc ? p.score > q.score : p.score < q.score;
+});
+```
+
+**同一个 lambda，把外面的 `desc` 改成 true，规则就变了** —— lambda 一个字没改，变的是它捕获到的状态。
+
+⚠️ **不写进 `[]` 就用不了**：
+
+```cpp
+int limit = 80;
+std::sort(a, a + n, [](const Player& p, const Player& q) {
+    return p.score >= limit;    // ❌ 编译错：limit 没有被捕获
+});
+```
+
+这是设计，不是 bug：编译器不许你偷偷依赖外部变量，要用就明写出来。
+
+### 6. lambda 的类型：写不出来，所以用 auto
+
+每个 lambda 都有一个**编译器现场生成的、独一无二的类型**，你拼不出它的名字：
+
+```cpp
+auto twice = [](int v) { return v * 2; };   // ✅ 用 auto 接住
+printf("%d\n", twice(21));
+
+std::function<bool(const Player&, const Player&)> f =
+    [](const Player& p, const Player& q) { return p.score < q.score; };  // ✅ 类型擦除版
+```
+
+区别：`auto` 接住的是**真实类型**（零开销，但只能存这一个 lambda）；`std::function` 什么兼容的都能装（能存进容器、能当成员），代价是一次间接调用。**能用 auto / 模板就用，需要"存起来"才用 `std::function`。**
+
+### 7. 比较规则的硬要求（A7 那个 `C3889` 的根因）
+
+`std::sort` 第三个参数必须是 **bool 返回、能构成"严格弱序"** 的规则，而且**不能修改元素**（所以参数用 `const Player&`）：
+
+- 返回 `bool`——返回 int、返回 void 都不行
+- `cmp(a, a)` 必须为 `false`（自己不能小于自己）
+- 规则必须能排出先后；**规则"区分不出元素"时，排序看起来没生效**：
+
+```cpp
+// 六个人的名字都是 2 个汉字 = 6 字节，strlen 永远相等
+std::sort(a, a + n, [](const Player& p, const Player& q) {
+    return strlen(p.name) < strlen(q.name);   // 排完顺序没变
+});
+```
+
+这不是 `std::sort` 坏了，是规则没有区分度。写规则前先问自己一句：**这条规则能把这些元素排出先后吗？**
+
+### 8. 别踩清单
+
+| 坑 | 后果 | 正确写法 |
+| --- | --- | --- |
+| `std::sort(a, a+n, better())` | 传进去的是调用结果 | 去掉括号：`better` |
+| 函数指针类型丢了括号 `bool *cmp(...)` | 变成"返回指针的函数" | `bool (*cmp)(...)` |
+| lambda 用外部变量却没写 `[]` | 编译错 | 写进捕获列表 |
+| 规则里改元素（参数没 `const&`） | 结果不可预测 | `const Player&` |
+| 规则永远返回 `false` | 顺序不变（像没排序） | 检查规则是否有区分度 |
+| 用 `[&]` 捕获局部变量后 lambda 活得更久 | 悬空引用 | 需要留存就用值捕获 / `std::function` |
+
+### 记忆口诀
+
+> **函数名不带括号 = 函数的地址；带上括号 = 调用它。**
+> **`bool (*cmp)(... )` 那对括号不能丢。**
+> **lambda = 无名函数 + 捕获列表；要用外面的变量，就得写进 `[]`。**
+
+### 自检（4 问）
+
+1. `better` 和 `better()` 分别是什么？
+2. `bool (*cmp)(const Player&, const Player&)` 和 `bool *cmp(const Player&, const Player&)` 差在哪？
+3. `[limit]` 和 `[&limit]` 的区别是什么？
+4. 为什么 `auto f = [](int v){ return v * 2; };` 能用，而 `??? f = ...` 写不出类型名？
+
+> 配套演示：`D:\dsh_qq\_srv\funcptr-demo.cpp`（编译运行 `build-funcptr-demo.cmd`），
+> 练习：`D:\比赛学习\C++练习-函数指针\`
