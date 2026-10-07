@@ -924,3 +924,164 @@ std::sort(a, a + n, [](const Player& p, const Player& q) {
 
 > 配套演示：`D:\dsh_qq\_srv\funcptr-demo.cpp`（编译运行 `build-funcptr-demo.cmd`），
 > 练习：`D:\比赛学习\C++练习-函数指针\`
+
+---
+
+## 十九、类与对象：构造 / 析构 / RAII（把 `grow` 收进一个类）
+
+> 前面练的 `grow` 是"三个散着的变量 + 一堆函数"。这一节把它收进一个**类**：
+> `data_` / `size_` / `cap_` 变成对象的内部状态，`new` / `delete` 的配对责任从**调用者**转移到**这个类自己**。
+
+### 1. `class` 和 `struct` 只差一件事
+
+| | 默认访问权限 | 其它 |
+| --- | --- | --- |
+| `struct` | `public` | 完全一样：都能有成员函数、构造、析构、继承 |
+| `class` | `private` | 同上 |
+
+```cpp
+struct PointS { int x, y; };                  // 外面能直接写 ps.x = 10
+class  PointC { int x, y; public: PointC(int x0, int y0) : x(x0), y(y0) {}
+                int getX() const { return x; } };   // 外面只能通过函数拿
+```
+
+**没有别的区别。** 习惯上：只装数据用 `struct`，有行为、要保护内部状态用 `class`。
+
+### 2. 成员函数后面的 `const` 是什么
+
+```cpp
+int size() const { return size_; }      // 承诺：这个函数不会改对象的成员
+```
+
+`const` 写在参数表后面，表示"不会修改本对象"。
+所以 **`const IntArray&` 只能调用带 `const` 的成员函数** —— 这就是 `operator[]` 要写两个版本的原因。
+
+### 3. 构造函数：对象"出生"时自动调用
+
+```cpp
+IntArray() : data_(nullptr), size_(0), cap_(0) {}     // ← 冒号后面叫「初始化列表」
+```
+
+- 名字和类同名，**没有返回类型**（连 `void` 都不写）
+- **初始化列表 vs 函数体里赋值**：初始化列表是在成员"出生"时就给初值；写进函数体是"先默认初始化、再赋值"。
+  `const` 成员和引用成员**只能**用初始化列表
+- **不写构造函数**时编译器会给一个默认的 —— 但**成员是不确定的值**（不是 0！）
+
+### 4. 析构函数：对象"死亡"时自动调用
+
+```cpp
+~IntArray() { delete[] data_; }     // 名字是 ~类名，没有参数、没有返回类型
+```
+
+调用时机（本机 demo 实测输出）：
+
+```
+  进入 scopeDemo
+      [构造] a
+      [构造] b（内层作用域）
+  内层作用域里
+      [析构] b（内层作用域）      ← 内层作用域一结束就死
+  内层作用域结束，但 a 还活着
+  离开 scopeDemo（马上会看到 a 的析构）
+      [析构] a                    ← 出函数才死
+```
+
+**规律：出作用域就死；同一作用域里，构造顺序和析构顺序相反（像栈）。**
+"传值"还会多走一次拷贝构造：
+
+```
+      [构造] outside
+      [拷贝构造] outside（说明这里发生了一次拷贝）   ← 值传递时拷了一份
+      函数体里：outside
+      [析构] outside                                 ← 形参那份先死
+  传值调用结束，outside 还在
+```
+
+### 5. 拷贝构造：默认是「浅拷贝」（这一节最重要的坑）
+
+三种情况会调用拷贝构造：`IntArray b = a;`、**传值** `f(a)`、函数返回对象。
+
+**默认的拷贝构造 = 成员逐个拷** —— 对指针成员，拷的是**地址**，不是它指向的内容：
+
+```cpp
+IntArray a;  a.push_back(1);
+IntArray b = a;        // 浅拷贝：a.data_ 和 b.data_ 指向同一块内存！
+                       // 于是 a、b 析构时 → 同一块内存被 delete[] 两次 → double free → 崩
+```
+
+真实项目里的规矩叫「**三法则**」：**只要需要自己写析构函数，通常也要写拷贝构造和拷贝赋值**
+（或者干脆禁止拷贝：`IntArray(const IntArray&) = delete;`）。
+
+想省事就用标准库 —— `std::vector` 这三件事都替你做对了。
+
+### 6. RAII：这一节的核心思想
+
+> **RAII = Resource Acquisition Is Initialization（资源获取即初始化）**
+> 把「**资源的生命周期**」绑在「**对象的生命周期**」上：**构造函数里拿资源，析构函数里还资源。**
+
+好处：不管从哪条路离开作用域 —— 正常结束、`return`、抛异常 —— **析构都会跑**，
+于是"忘记释放"这件事被编译器接手了：
+
+```cpp
+void earlyReturn(int n) {
+    IntArray arr;
+    arr.push_back(n);
+    if (n > 0) return;        // ← 提前 return，这里没写任何 delete，但析构照样跑
+}
+```
+
+同一思想在标准库里的样子：
+
+| 资源 | RAII 包装 |
+| --- | --- |
+| 堆内存 | `std::vector` / `std::string` / `unique_ptr` |
+| 文件句柄 | `std::ifstream` / `ofstream` |
+| 锁 | `std::lock_guard` |
+
+### 7. `grow` → `IntArray`：对照一下
+
+| | 之前（散着的） | 现在（一个类） |
+| --- | --- | --- |
+| 数据 | `int* data; int size; int cap;` 三个变量 | 三个 `private` 成员 |
+| 扩容 | `grow(data, size, cap, v)` 手动调用 | `arr.push_back(v)` 自己判断 |
+| 释放 | 调用者记得 `delete[]` | 析构函数自动做 |
+| 出错风险 | 忘了释放、忘了扩容、传错 cap | 用的人不可能忘 |
+
+**扩容三步顺序（写错就是"搬之前把家拆了"）**：
+
+```cpp
+int* fresh = new int[newCap];                        // ① 申请新块
+for (int i = 0; i < size_; i++) fresh[i] = data_[i]; // ② 老数据搬过去
+delete[] data_;                                      // ③ 释放老块（必须在搬完之后）
+data_ = fresh;  cap_ = newCap;                       // ④ 接手新块
+```
+
+实测的容量轨迹（`push` 5 次）：`cap` = **1 → 2 → 4 → 4 → 8**，只重新分配了 3 次。
+
+### 8. 别踩清单
+
+| 坑 | 后果 | 正确做法 |
+| --- | --- | --- |
+| `new[]` 配 `delete`（漏方括号） | ASan 报 alloc-dealloc-mismatch | `new[]` 配 `delete[]` |
+| 扩容时先 `delete[]` 再搬 | use-after-free，数据全乱 | 申请 → 搬 → 释放 |
+| 析构函数忘了释放 | 内存泄漏（ASan 会指出来） | 析构里 `delete[]` |
+| `operator[]` 返回 `int` 而不是 `int&` | `arr[1] = 999` 改不进去 | 不带 `const` 的返回引用 |
+| 只写一个 `operator[]`（不带 const） | `const IntArray&` 用不了 | 两个都写 |
+| `sum(IntArray a)` 按值传 | 拷贝整个对象，可能 double free | `const IntArray&` |
+| 不写构造函数就直接用 | 成员是不确定的值 | 初始化列表写清楚 |
+
+### 记忆口诀
+
+> **构造函数管"出生"，析构函数管"死亡"；RAII 就是让这两个函数把资源包起来。**
+> **默认拷贝是浅拷贝：指针只拷地址，两个对象一块内存 → double free。**
+> **写了析构，就要想想拷贝（三法则）；懒得想，就用 `std::vector`。**
+
+### 自检 4 问
+
+1. `IntArray() : data_(nullptr), size_(0), cap_(0) {}` 里冒号后面那串叫什么？和写在函数体里赋值差在哪？
+2. 析构函数里 `delete[] data_;` 为什么不用先判断 `data_` 是不是 `nullptr`？
+3. `int& operator[](int i)` 和 `int operator[](int i) const` 为什么必须写两个？
+4. `IntArray b = a;` 之后程序可能怎么炸？为什么？
+
+> 配套演示：`D:\dsh_qq\_srv\class-demo.cpp`（编译运行 `build-class-demo.cmd`），
+> 练习：`D:\比赛学习\C++练习-类与RAII\`
