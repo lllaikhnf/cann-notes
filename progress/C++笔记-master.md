@@ -1085,3 +1085,152 @@ data_ = fresh;  cap_ = newCap;                       // ④ 接手新块
 
 > 配套演示：`D:\dsh_qq\_srv\class-demo.cpp`（编译运行 `build-class-demo.cmd`），
 > 练习：`D:\比赛学习\C++练习-类与RAII\`
+
+---
+
+## 二十、拷贝构造 与 三法则（深拷贝）
+
+> 上一节写了 `IntArray`：构造 / 析构 / `push_back` / `operator[]`，但**没写拷贝**。
+> 这一节补它 —— 因为**默认的拷贝会要命**。
+
+### 1. 默认拷贝 = 浅拷贝（指针只拷地址）
+
+编译器会自动生成一个拷贝构造函数，做的事是"**成员逐个拷**"。对指针成员来说，拷的是**地址**：
+
+```cpp
+class Shallow {
+public:
+    int* data_;
+    Shallow(int n) : data_(new int[n]) {}
+    ~Shallow() { delete[] data_; }        // 析构本身没问题
+};
+
+Shallow a(3);
+Shallow b = a;        // 默认拷贝构造
+```
+
+实测（`copy-demo.cpp`）：
+
+```
+   a.data_ = 0000014B73B38580
+   b.data_ = 0000014B73B38580        ← 两个地址完全相同！两个对象共用同一块内存
+```
+
+后果两条：
+1. 改 `b` 的内容会**同时改到 `a`**
+2. 作用域结束时，`a` 和 `b` 各自 `delete[]` **同一块内存** → **double free**
+
+**这不是理论风险**。用 ASan 跑 `copy-demo-浅拷贝会炸.cpp` 的实测输出：
+
+```
+ERROR: AddressSanitizer: attempting double-free on 0x1224941a0030 in thread T0:
+    #1 ... in Shallow::~Shallow(void) ...\copy-demo-浅拷贝会炸.cpp:16
+    #2 ... in main                     ...\copy-demo-浅拷贝会炸.cpp:27
+0x1224941a0030 is located 0 bytes inside of 12-byte region [0x1224941a0030,0x1224941a003c)
+```
+
+注意它**直接把析构函数那一行点出来了**。
+
+### 2. 什么时候会调用拷贝构造
+
+| 写法 | 调用的是 |
+| --- | --- |
+| `Vec b = a;` | **拷贝构造**（b 还不存在，正在被创建） |
+| `f(a)`（参数按值传） | **拷贝构造**（形参正在被创建） |
+| `return obj;`（按值返回） | 拷贝构造（或移动 / 被省略） |
+| `c = a;`（c 已存在） | **拷贝赋值**（`operator=`） |
+
+**`Vec b = a;` 和 `c = a;` 是两个不同的函数**，这一点最容易混。
+
+### 3. 三法则（Rule of Three）
+
+> **只要你需要自己写析构函数，通常也要写拷贝构造和拷贝赋值。**
+
+```cpp
+class Vec {
+public:
+    Vec() : data_(nullptr), size_(0), cap_(0) {}
+    ~Vec() { delete[] data_; }                                   // ① 析构
+
+    Vec(const Vec& other) : data_(nullptr), size_(0), cap_(0) {  // ② 拷贝构造（深拷贝）
+        reserve(other.size_);                                    //    先初始化成空，再申请
+        for (int i = 0; i < other.size_; i++) data_[i] = other.data_[i];
+        size_ = other.size_;
+    }
+
+    Vec& operator=(const Vec& other) {                           // ③ 拷贝赋值
+        if (this == &other) return *this;                        //    自赋值检查！
+        reserve(other.size_);
+        for (int i = 0; i < other.size_; i++) data_[i] = other.data_[i];
+        size_ = other.size_;
+        return *this;                                            //    返回 *this
+    }
+private:
+    int* data_; int size_; int cap_;
+};
+```
+
+实测（改成深拷贝之后）：
+
+```
+   a: size=3 地址=0000014B73B38440 内容=7 7 7
+      [拷贝构造] 新地址 0000014B73B38490 ← 从 0000014B73B38440 复制内容
+   b: size=3 地址=0000014B73B38490 内容=7 7 7
+   两个地址**不同** —— 各自一块内存，互不影响
+   改了 b[0] = 99 之后：a[0]=7、b[0]=99
+```
+
+### 4. 拷贝赋值里那三件事，一件都不能少
+
+```cpp
+Vec& operator=(const Vec& other) {
+    if (this == &other) return *this;   // ① 自赋值检查
+    // ② 释放旧内存 + 申请新的 + 拷内容
+    return *this;                       // ③ 返回 *this
+}
+```
+
+- **① 自赋值检查**：`a = a;` 看起来毫无意义，但真实代码里经常发生（引用/指针绕了一圈、数组里同一个元素）。
+  没有它，流程会是"先 `delete[]` 掉自己的内存 → 再从**已经释放的内存**里拷数据" → 崩。
+- **② 顺序**：一定是**先申请新的、把内容搬过去，最后才释放旧的**（和 `grow` 一个道理）。
+- **③ `return *this`**：返回 `Vec&` 而不是 `Vec`，才能连写 `a = b = c`，也不会白白多一次拷贝。
+
+### 5. 不想写这些怎么办
+
+- **用 `std::vector`**：三法则（以及移动语义）它都写对了，你只管用
+- **禁止拷贝**：如果这个类本来就不该被拷贝，明确写出来（比"忘了写"安全得多）
+
+```cpp
+Vec(const Vec&) = delete;
+Vec& operator=(const Vec&) = delete;
+```
+
+- **五法则**：C++11 之后，如果这个类要"搬"而不是"拷"（移动构造 / 移动赋值），一共是五个函数 —— 后面再说
+
+### 6. 一句话总结这一节
+
+> **默认拷贝是浅拷贝：指针只拷地址，两个对象一块内存 → double free。**
+> **三法则：写了析构，就要想拷贝构造和拷贝赋值。**
+> **拷贝赋值三件事：自赋值检查 → 释放旧内存再申请 → `return *this`。**
+
+### 7. 别踩清单
+
+| 坑 | 后果 | 正确做法 |
+| --- | --- | --- |
+| 只写析构，不写拷贝 | 默认浅拷贝 → **double free** | 三法则一起写 |
+| 拷贝赋值忘了自赋值检查 | `v = v` 崩 | `if (this == &other) return *this;` |
+| 拷贝赋值忘了 `return *this` | `a = b = c` 不成立 | 返回 `Vec&`，`return *this;` |
+| 返回类型写成 `Vec`（漏 `&`） | 多一次拷贝，连写结果错 | `Vec& operator=` |
+| 拷贝构造里没先把成员初始化成空 | `reserve` 里 `delete[]` 乱指针 → 崩 | 初始化列表先写 `data_(nullptr)` 等 |
+| 对带指针的类用 `memcpy` | 绕过拷贝构造，指针还是共用 | 别这么干，写拷贝构造 |
+
+### 自检 4 问
+
+1. `Vec b = a;` 和 `c = a;`（c 已存在）分别调用哪个函数？
+2. 拷贝构造里为什么要把成员**先初始化成空**再 `reserve`？
+3. `if (this == &other) return *this;` 删掉会怎样？`a = a` 为什么真会发生？
+4. `std::vector` 为什么不用你操心这些？
+
+> 配套演示：`D:\dsh_qq\_srv\copy-demo.cpp`（`build-copy-demo.cmd`）、
+> 反例实证：`copy-demo-浅拷贝会炸.cpp`（ASan 当场抓 double free），
+> 练习：`D:\比赛学习\C++练习-拷贝与三法则\`
